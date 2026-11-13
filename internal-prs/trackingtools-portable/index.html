@@ -1,0 +1,12 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>TrackingTools PR: MTV</title>
+<style>body{font-family:sans-serif;max-width:900px;margin:24px auto;padding:0 16px;line-height:1.45} td{padding:3px 12px 3px 0;vertical-align:top}</style>
+</head><body>
+<h2>TrackingTools PR: tracking validation</h2>
+<p>Compared: <b>master</b> (black, CMSSW_20_1_X_2026-11-12-1100) and <b>master + TrackingTools PR</b> (red: TrackingTools beam-line state and perigee Jacobian callable on GPUs), on the same events.
+Samples: ttbar and QCD (pT-hat 1.8-2.4 TeV), PU200, D121, 500 + 500 events per set, CPU (serial backend).</p>
+<table>
+<tr><td><b>Phase-2 HLT, CPU menu</b> (HLT:75e33_timing; seven collections), 500 ttbar + 500 QCD events</td><td><a href="hlt_ttbar/plots_hlt.html">ttbar</a><br><a href="hlt_qcd/plots_hlt.html">QCD</a></td></tr>
+<tr><td><b>Offline tracking</b>, workflow 34634.711 (initialStep + highPtTripletStep), 500 ttbar + 500 QCD events</td><td><a href="off01_ttbar/index.html">ttbar</a><br><a href="off01_qcd/index.html">QCD</a></td></tr>
+<tr><td><b>Offline tracking</b>, workflow 34634.714 (all iterations), 500 ttbar + 500 QCD events</td><td><a href="offall_ttbar/index.html">ttbar</a><br><a href="offall_qcd/index.html">QCD</a></td></tr>
+</table>
+</body></html>

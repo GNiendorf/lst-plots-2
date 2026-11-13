@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>CMSSW resource utilisation</title>
+
+    <meta charset="utf-8" />
+
+<script>window.requestAnimationFrame = function (cb) { return window.setTimeout(function () { cb(performance.now()); }, 16); }; window.cancelAnimationFrame = function (id) { window.clearTimeout(id); };</script>
+    <!-- CarrotSearch Circles -->
+    <link rel="stylesheet" href="CarrotSearch/assets/css/reset.css" />
+    <link rel="stylesheet" href="CarrotSearch/assets/css/layout.css" />
+
+    <script src="CarrotSearch/carrotsearch.circles.js"></script>
+    <!--script src="CarrotSearch/carrotsearch.circles.asserts.js"></script-->
+    <script src="CarrotSearch/assets/js/carrotsearch.examples.onresizehook.js"></script>
+    <script src="CarrotSearch/assets/js/carrotsearch.examples.viewport.js"></script>
+
+    <!-- jQuery, DataTables, and plugins-->
+    <link rel="stylesheet" type="text/css" href="DataTables/datatables.min.css"/>
+    <script type="text/javascript" src="DataTables/datatables.min.js"></script>
+    <script type="text/javascript" src="DataTables/plug-ins/sorting/absolute.js"></script>
+    <script type="text/javascript" src="DataTables/plug-ins/sorting/any-number.js"></script>
+    <script type="text/javascript" src="DataTables/plug-ins/dataRender/ellipsis.js"></script>
+
+    <!-- load the available datasets, groups and colour schemes -->
+    <script type="text/javascript">
+    var data_name = "data";var datasets = [ 'cpu_menu_alpaka_mkfit', 'cpu_menu_kf_fit', 'cpu_menu_mkfit_fit', 'gpu_menu_alpaka_mkfit', 'gpu_menu_kf_fit', 'gpu_menu_mkfit_fit' ];
+var groups = [ 'hlt' ];
+var colours = [ 'default' ];
+var group_versions = { "hlt": 1793410257 };
+var colour_versions = { "default": 1791405088 };
+
+    </script>
+
+    <!-- local code -->
+    <style type="text/css">
+      html, body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+
+       #visualization {
+        z-index: 1;}
+
+      .dataTable>tbody>tr{
+        cursor: pointer;
+      }
+
+      .property_label {
+        width:      60%;
+        text-align: left;
+      }
+
+      .property_value {
+        width:      20%;
+        text-align: right;
+      }
+
+      .property_fraction {
+        width:      20%;
+        text-align: right;
+      }
+
+      .selectedGroupRow {
+        background-color: #e0e0e0 !important;
+      }
+
+      #selected {
+        font-style: italic;
+      }
+    </style>
+
+  </head>
+
+  <body>
+    <div id="visualization" style="width: 60%;"></div>
+
+    <div id="sidebar" style="width: 40%; overflow: auto;">
+      <form>
+        <div style="display:inline-block;">
+          <b>Dataset</b>
+          <select id="dataset_menu" name="dataset" onchange="updateDataset()">
+            <option disabled selected value="">Select the data to visualise</option>
+          </select>
+        </div>
+        <div style="display:inline-block;">
+          or <b>upload a file</b>
+          <input type="file" accept=".json" id="dataset_upload" oninput="uploadDataset(this.files)"/>
+        </div>
+        <div style="display:inline-block;">
+          <b>Metric</b>
+          <select id="metric_menu" name="resource" onchange="updateMetrics()">
+            <option disabled selected value="">Select some data to choose a metric</option>
+          </select>
+        </div>
+        <div style="display:inline-block;">
+          <b>Groups</b>
+          <select id="groups_menu" name="groups" onchange="updateGroups()"></select>
+        </div>
+        <div style="display:inline-block;">
+          <b>Colour style</b>
+          <select id="colours_menu" name="colours" onchange="updateColours()"></select>
+	      </div>
+        <div style="display:inline-block;">
+          <b>View</b>
+          <select id="view_menu" onchange="switchChartView()" style="display:none">
+            <option value="pie">Pie</option>
+            <option value="bar">Bar</option>
+          </select>
+        </div>
+        <div style="display:inline-block;">
+          <input type="checkbox" checked id="show_labels_checkbox" name="show_labels" onchange="updateShowLabels()"></input>
+          <b>Show labels</b>
+        </div>
+        <div style="display:inline-block;">
+          <input type="checkbox" checked id="show_animations_checkbox" name="show_animations" onchange="updateShowAnimations()"></input>
+          <b>Show animations</b>
+        </div>
+        <div style="display:inline-block;">
+          <button type="button" onclick="getImage()">Download image</button>
+        </div>
+        <div style="display:inline-block;">
+          <button type="button" onclick="downloadDataset()">Download dataset</button>
+        </div>
+      </form>
+      <hr/>
+
+      <table id="properties" style="width:100%">
+      <thead>
+        <tr>
+          <th class="property_label">Element</th>
+          <th class="property_value">Resource</th>
+          <th class="property_fraction">Fraction</th>
+        </tr>
+      </thead>
+      <tbody>
+      </tbody>
+      <tfoot>
+        <tr id="selected">
+          <td id="selected_label" class="property_label"></td>
+          <td id="selected_value" class="property_value"></td>
+          <td id="selected_percent" class="property_fraction"></td>
+        </tr>
+      </tfoot>
+      </table>
+    </div>
+
+
+    <!-- show this tool's logo in the upper left corner -->
+    <div id="logo" style="position: absolute; top: 32px; left: 32px; z-index: 999;">
+      <a href="https://github.com/fwyzard/circles">
+        <img src="images/pie.png" width="72" height="72"/>
+      </a>
+    </div>
+
+    <!-- show a tootip when the mouse is hovering over one of the slices -->
+    <style>
+      .tooltip {
+          position: absolute;
+          top: 400px;
+          left: 200px;
+          visibility: hidden;
+          background: #646464;
+          border-radius:4px;
+          padding: 6px 12px;
+          font-family: arial;
+          font-size: 16px;
+          text-shadow: 0px 1px 1px #000;
+          color: #ffffff;
+          z-index: 9999;
+      }
+    </style>
+
+    <div id="tooltip" class="tooltip">Tooltip</div>
+
+  </body>
+  <!-- Load common.js -->
+  <script src="common.js"></script>
+</html>

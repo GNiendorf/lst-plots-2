@@ -1,0 +1,180 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>LST duplicate removal on eta-phi grids: per-step detail</title>
+<style>body{font-family:sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;line-height:1.45;color:#111;background:#fff}
+h1{font-size:1.35em} h2{font-size:1.15em;margin-top:1.8em;border-bottom:1px solid #ccc;padding-bottom:3px}
+table{border-collapse:collapse;margin:10px 0 14px 0;font-size:0.93em;display:block;overflow-x:auto}
+th,td{border:1px solid #bbb;padding:4px 9px;vertical-align:top;text-align:left}
+th{background:#f0f0f0} table.num td:not(:first-child),table.num th:not(:first-child){white-space:nowrap}
+code{font-family:monospace;font-size:0.95em;background:#f4f4f4;padding:0 2px}
+a{color:#0645ad}
+@media (prefers-color-scheme: dark){body{color:#ddd;background:#181818} th{background:#2a2a2a} th,td{border-color:#555} code{background:#2a2a2a} h2{border-color:#555} a{color:#8ab4f8}}</style>
+</head><body>
+<p><a href="index.html">Tracking validation plots of this change</a></p>
+
+<h1>LST duplicate removal on eta-phi grids: per-step changes, timing and memory</h1>
+<p>Before = master 5b4335d798f; after = the same master with the change applied (three commits, head eb5e54e3d45). The change speeds up the seven duplicate-removal and cross-cleaning steps of LST. Each step compared every pair of objects; now it visits only the objects that can pass its cuts, found through eta-phi grids and hit buckets. Per step: the kernels before → after and their time; then the totals and one memory table.</p>
+<p>Method: LST standalone, built in the CMSSW_20_1_0_pre4 environment, HLT settings (pT cut 0.8 GeV), CPU 32 streams, GPU (NVIDIA L40) 1 stream, mean of 2 rounds (they agree within 4.7% for every value above 0.002 ms). Kernel times come from an instrumented build, not part of the change, that waits after each kernel; a step time also includes its allocations, memsets and host synchronizations. On the CPU, the instrumented and the plain builds give identical track candidates. Memory: LST's own per-event allocation report (CPU, 1 stream), with the new buffers added to it in the instrumented build. Samples:</p>
+<ul>
+<li>ttbar: the standalone PU200 ttbar file, 175 events. Its pLSs come from offline seeds, about 21.6k per event.</li>
+<li>QCD PU200: 200 events of RelValQCD_Pt_1800_2400_14 PU200 (D121), run through the Phase-2 HLT menu (CMSSW_20_1_X_2026-10-27-2300) into a tracking ntuple. Its pLSs are the HLT pixel tracks that <code>hltInputLST</code> reads, about 1.8k per event.</li>
+<li>In the totals only: ttbar PU200 through the same HLT chain (200 events) and QCD high-pT jets without pileup (the standalone jets file, 200 events).</li>
+</ul>
+<p>Each new grid or hit-bucket list is built in three launches: a count pass, <code>ScanCellCounts</code>, then a fill pass. The count and fill passes are the same kernel, which therefore runs twice per event (marked "2 calls"; the time is for both calls). <code>ScanCellCounts</code> runs once per step. Every other kernel runs once per event.</p>
+<h2>pLS cross cleaning (TC stage)</h2>
+<table>
+<tr><th>Kernel</th><th>Before</th><th>After</th></tr>
+<tr><td><code>PixelHitIndexMaxKernel</code></td><td>–</td><td>new: the largest pixel and outer-tracker hit index of the pLS hits, which sizes the bit set below; read back together with the existing TC counts</td></tr>
+<tr><td><code>FillCrossCleanGrid</code></td><td>–</td><td>new (2 calls): counts each T5, pT3 and pT5 TC in its eta-phi cell and, for a pT3 or pT5, sets one bit per hit of its pLS; then lists the TCs by cell</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>–</td><td>new: the cell offsets</td></tr>
+<tr><td><code>CrossCleanpLS</code></td><td>every quad pLS against every TC: dR2 window and embedding distance for a T5, shared pixel hit or dR2 window for a pT3 or pT5</td><td>per quad pLS: looks up its 4 hits in the bit set, then compares only with the TCs in the 3x3 cells around it</td></tr>
+</table>
+<p>Problem: each quad pLS looped over all TCs, although only the TCs inside its dR2 window or sharing one of its pixel hits can remove it.</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><code>PixelHitIndexMaxKernel</code></td><td>– → 0.036</td><td>– → 0.012</td><td>– → 0.012</td><td>– → 0.008</td></tr>
+<tr><td><code>FillCrossCleanGrid</code> (2 calls)</td><td>– → 0.018</td><td>– → 0.015</td><td>– → 0.019</td><td>– → 0.019</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>– → 0.001</td><td>– → 0.001</td><td>– → 0.008</td><td>– → 0.008</td></tr>
+<tr><td><code>CrossCleanpLS</code></td><td>127.7 → 0.47</td><td>12.7 → 0.080</td><td>0.294 → 0.019</td><td>0.041 → 0.026</td></tr>
+<tr><td><b>step</b></td><td><b>127.7 → 0.53</b></td><td><b>12.7 → 0.11</b></td><td><b>0.295 → 0.075</b></td><td><b>0.042 → 0.080</b></td></tr>
+</table>
+<h2>pT5 duplicates (pT5 stage)</h2>
+<table>
+<tr><th>Kernel</th><th>Before</th><th>After</th></tr>
+<tr><td><code>FillPixelQuintupletGrid</code></td><td>–</td><td>new (2 calls): the pT5s by eta-phi cell</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>–</td><td>new: the cell offsets</td></tr>
+<tr><td><code>RemoveDupPixelQuintupletsFromMap</code></td><td>every pT5 pair: eta-phi window, then at least 7 shared hits, with the hits of both pT5s rebuilt from their MDs for each pair</td><td>per pT5, only the pT5s in the 3x3 cells around it; its own hits are built once, the score is compared before the hits, and the hit count stops once the result is known</td></tr>
+</table>
+<p>Problem: all pT5 pairs were visited, and every pair inside the window rebuilt the hit lists of both pT5s. Unchanged: <code>CreatePixelQuintupletsFromMap</code> and the pT5 compaction (<code>CompactPrefixObjects</code>).</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><code>FillPixelQuintupletGrid</code> (2 calls)</td><td>– → 0.045</td><td>– → 0.008</td><td>– → 0.018</td><td>– → 0.015</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>– → 0.001</td><td>– → 0.001</td><td>– → 0.008</td><td>– → 0.009</td></tr>
+<tr><td><code>RemoveDupPixelQuintupletsFromMap</code></td><td>87.5 → 10.5</td><td>5.74 → 0.71</td><td>3.08 → 0.070</td><td>0.214 → 0.021</td></tr>
+<tr><td><b>step</b></td><td><b>87.5 → 10.6</b></td><td><b>5.74 → 0.72</b></td><td><b>3.08 → 0.103</b></td><td><b>0.215 → 0.052</b></td></tr>
+</table>
+<h2>T5 cross cleaning (TC stage)</h2>
+<table>
+<tr><th>Kernel</th><th>Before</th><th>After</th></tr>
+<tr><td><code>FillPixelObjectGrid</code></td><td>–</td><td>new (2 calls): the promoted pT5s and pT3s by eta-phi cell</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>–</td><td>new: the cell offsets</td></tr>
+<tr><td><code>CrossCleanT5</code></td><td>per T5, every pT5 and pT3: eta-phi window, then at least 4 shared outer-tracker hits with a promoted one</td><td>per T5, only the promoted pT5s and pT3s in the 3x3 cells around it; stops at the first one that removes it</td></tr>
+</table>
+<p>Problem: each T5 looped over all pT5s and pT3s, also the far ones and those that are not promoted.</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><code>FillPixelObjectGrid</code> (2 calls)</td><td>– → 0.041</td><td>– → 0.023</td><td>– → 0.015</td><td>– → 0.016</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>– → 0.001</td><td>– → 0.001</td><td>– → 0.008</td><td>– → 0.008</td></tr>
+<tr><td><code>CrossCleanT5</code></td><td>6.95 → 0.15</td><td>4.77 → 0.20</td><td>0.159 → 0.057</td><td>0.211 → 0.108</td></tr>
+<tr><td><b>step</b></td><td><b>6.95 → 0.19</b></td><td><b>4.78 → 0.22</b></td><td><b>0.160 → 0.087</b></td><td><b>0.213 → 0.138</b></td></tr>
+</table>
+<h2>T5 duplicates (TC stage)</h2>
+<table>
+<tr><th>Kernel</th><th>Before</th><th>After</th></tr>
+<tr><td><code>FillT5DupGrid</code></td><td>–</td><td>new (2 calls): the T5s still alive by eta-phi cell</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>–</td><td>new: the cell offsets</td></tr>
+<tr><td><code>RemoveDupQuintupletsBeforeTC</code></td><td>one thread per pair of eligible modules, looping over all T5 pairs of the two modules (eta-phi window, then shared hits and embedding distance)</td><td>one block per eligible T5 module on the GPU (one block on the CPU); per T5, only the T5s in the 3x3 cells around it, spread over the threads; each pair is tested once</td></tr>
+</table>
+<p>Problem: every pair of modules was visited, also far-apart ones, and a single thread looped over all T5 pairs of a module pair, which is long for a dense jet module.</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><code>FillT5DupGrid</code> (2 calls)</td><td>– → 0.085</td><td>– → 0.091</td><td>– → 0.017</td><td>– → 0.019</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>– → 0.002</td><td>– → 0.002</td><td>– → 0.010</td><td>– → 0.010</td></tr>
+<tr><td><code>RemoveDupQuintupletsBeforeTC</code></td><td>45.5 → 0.61</td><td>55.2 → 1.03</td><td>0.124 → 0.025</td><td>2.91 → 0.064</td></tr>
+<tr><td><b>step</b></td><td><b>45.5 → 0.70</b></td><td><b>55.2 → 1.12</b></td><td><b>0.125 → 0.058</b></td><td><b>2.91 → 0.100</b></td></tr>
+</table>
+<h2>pT3 duplicates (pT3 stage)</h2>
+<table>
+<tr><th>Kernel</th><th>Before</th><th>After</th></tr>
+<tr><td><code>FillPixelTripletHitBuckets</code></td><td>–</td><td>new (2 calls): each pT3 listed under the buckets of its 6 T3 hits</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>–</td><td>new: the bucket offsets</td></tr>
+<tr><td><code>RemoveDupPixelTripletsFromMap</code></td><td>every pT3 pair: shared pLS and T3 hits (at least 5), then the T3 layer and the score decide which one is removed</td><td>per pT3, only the pT3s listed under its T3 hits; the layer and score order is checked before the hits</td></tr>
+</table>
+<p>Problem: all pT3 pairs were compared hit by hit, although a duplicate shares at least 5 hits, more than the 4 of a pLS, so always a T3 hit. Unchanged: <code>CreatePixelTripletsFromMap</code> and the pT3 compaction (<code>CompactPrefixObjects</code>).</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><code>FillPixelTripletHitBuckets</code> (2 calls)</td><td>– → 0.021</td><td>– → 0.005</td><td>– → 0.016</td><td>– → 0.017</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>– → 0.006</td><td>– → 0.006</td><td>– → 0.017</td><td>– → 0.018</td></tr>
+<tr><td><code>RemoveDupPixelTripletsFromMap</code></td><td>13.7 → 0.26</td><td>1.02 → 0.034</td><td>0.105 → 0.022</td><td>0.018 → 0.011</td></tr>
+<tr><td><b>step</b></td><td><b>13.7 → 0.29</b></td><td><b>1.02 → 0.050</b></td><td><b>0.107 → 0.062</b></td><td><b>0.019 → 0.053</b></td></tr>
+</table>
+<h2>pT3 cross cleaning (TC stage)</h2>
+<table>
+<tr><th>Kernel</th><th>Before</th><th>After</th></tr>
+<tr><td><code>FillPixelQuintupletSeedGrid</code></td><td>–</td><td>new (2 calls): the pT5s by the eta-phi cell of their pLS</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>–</td><td>new: the cell offsets</td></tr>
+<tr><td><code>CrossCleanpT3</code></td><td>every pT3 against every pT5: pLS dR2 &lt; 1e-5</td><td>per pT3, only the pT5s in the 3x3 cells around its pLS</td></tr>
+</table>
+<p>Problem: each pT3 looped over all pT5s for a very small window.</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><code>FillPixelQuintupletSeedGrid</code> (2 calls)</td><td>– → 0.062</td><td>– → 0.012</td><td>– → 0.019</td><td>– → 0.017</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>– → 0.003</td><td>– → 0.003</td><td>– → 0.010</td><td>– → 0.010</td></tr>
+<tr><td><code>CrossCleanpT3</code></td><td>3.82 → 0.026</td><td>0.74 → 0.014</td><td>0.076 → 0.014</td><td>0.017 → 0.012</td></tr>
+<tr><td><b>step</b></td><td><b>3.82 → 0.095</b></td><td><b>0.74 → 0.032</b></td><td><b>0.077 → 0.048</b></td><td><b>0.019 → 0.045</b></td></tr>
+</table>
+<h2>T4 cross cleaning (TC stage)</h2>
+<table>
+<tr><th>Kernel</th><th>Before</th><th>After</th></tr>
+<tr><td><code>FillTCHitBuckets</code></td><td>–</td><td>new (2 calls): each T5, pT5 and pT3 TC listed under the buckets of the hits that are compared (the T5 hits of a T5 or pT5, the T3 hits of a pT3)</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>–</td><td>new: the bucket offsets</td></tr>
+<tr><td><code>CrossCleanT4</code></td><td>per lower module and T4, every TC: at least 3 shared hits (2 for a pT3 or pT5), with the T3 hits of a pT3 rebuilt from its MDs for each pair</td><td>flat over the T4s (dense after compaction) and their hits; for each hit, only the TCs listed under it</td></tr>
+</table>
+<p>Problem: each T4 looped over all TCs, although a TC that removes it shares at least two of its hits; on top of that the kernel looped over all lower modules and rebuilt the pT3 hits for every pair.</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><code>FillTCHitBuckets</code> (2 calls)</td><td>– → 0.046</td><td>– → 0.050</td><td>– → 0.022</td><td>– → 0.022</td></tr>
+<tr><td><code>ScanCellCounts</code></td><td>– → 0.005</td><td>– → 0.005</td><td>– → 0.017</td><td>– → 0.017</td></tr>
+<tr><td><code>CrossCleanT4</code></td><td>2.25 → 0.008</td><td>3.05 → 0.020</td><td>0.135 → 0.026</td><td>0.257 → 0.033</td></tr>
+<tr><td><b>step</b></td><td><b>2.25 → 0.063</b></td><td><b>3.05 → 0.079</b></td><td><b>0.136 → 0.072</b></td><td><b>0.259 → 0.080</b></td></tr>
+</table>
+<h2>Shared code</h2>
+<ul>
+<li><code>EtaPhiGrid</code> (new <code>EtaPhiGrid.h</code>): eta-phi cells at least as wide as the step's window, so for finite eta and phi the 3x3 cells around an object hold all its partners inside the window.</li>
+<li><code>ScanCellCounts</code> (same file): one block; turns the per-cell counts into cell offsets between the count and fill passes. Its seven calls take 0.02 ms/event on the CPU and 0.08 on the GPU, included in the rows above.</li>
+<li>Hit buckets (new <code>HitBuckets.h</code>): 8192 buckets by the low 13 bits of the hit index, so two objects that share a hit are in the same bucket.</li>
+<li>On the serial CPU backend, which runs one thread per block, the launches sized by modules or objects use a single block.</li>
+</ul>
+<h2>All seven steps</h2>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr>
+<tr><td><b>seven steps</b></td><td><b>287.5 → 12.4</b></td><td><b>83.2 → 2.34</b></td><td><b>3.98 → 0.505</b></td><td><b>3.68 → 0.548</b></td></tr>
+<tr><td>pT5 stage</td><td>112.1 → 35.2</td><td>10.1 → 5.12</td><td>3.43 → 0.444</td><td>0.364 → 0.198</td></tr>
+<tr><td>pT3 stage</td><td>45.2 → 31.6</td><td>13.0 → 12.1</td><td>0.445 → 0.393</td><td>0.973 → 0.997</td></tr>
+<tr><td>TC stage</td><td>187.4 → 2.76</td><td>77.6 → 2.67</td><td>1.08 → 0.628</td><td>14.3 → 11.3</td></tr>
+</table>
+<p>The same totals on the two other samples:</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>CPU ttbar PU200, HLT chain</th><th>CPU jets, no pileup</th><th>GPU ttbar PU200, HLT chain</th><th>GPU jets, no pileup</th></tr>
+<tr><td><b>seven steps</b></td><td><b>78.8 → 1.85</b></td><td><b>4.50 → 0.71</b></td><td><b>0.691 → 0.433</b></td><td><b>2.32 → 0.481</b></td></tr>
+<tr><td>pT5 stage</td><td>9.30 → 4.50</td><td>1.80 → 1.30</td><td>0.305 → 0.171</td><td>0.194 → 0.167</td></tr>
+<tr><td>pT3 stage</td><td>5.05 → 4.27</td><td>46.4 → 46.4</td><td>0.135 → 0.169</td><td>0.996 → 1.03</td></tr>
+<tr><td>TC stage</td><td>73.2 → 1.79</td><td>4.22 → 1.01</td><td>0.741 → 0.588</td><td>14.9 → 13.1</td></tr>
+</table>
+<p>Without the instrumentation (plain builds, median of 3 rounds, mean per event):</p>
+<table class="num">
+<tr><th>ms/event, before → after</th><th>GPU ttbar</th><th>GPU QCD PU200</th><th>CPU ttbar</th><th>CPU QCD PU200</th></tr>
+<tr><td>pT5, pT3 and TC stages</td><td>4.85 → 1.22</td><td>15.52 → 12.23</td><td>342.4 → 69.2</td><td>100.2 → 19.8</td></tr>
+<tr><td>pT3 stage</td><td>0.43 → 0.36</td><td>0.94 → 0.95</td><td>45.1 → 31.4</td><td>13.0 → 12.0</td></tr>
+<tr><td><b>whole event</b></td><td><b>6.84 → 3.21 (-53.1%)</b></td><td><b>37.85 → 34.55 (-8.7%)</b></td><td><b>592.3 → 319.0 (-46.1%)</b></td><td><b>804.5 → 724.1 (-10.0%)</b></td></tr>
+</table>
+<p>The rest of these three stages keeps its time: <code>CreatePixelQuintupletsFromMap</code> and <code>CreatePixelTripletsFromMap</code> within 2.1% (at most 0.8% slower), and within 0.04 ms/event the two compactions and, in the TC stage, <code>RemoveDupQuadrupletsBeforeTC</code>, <code>CountSurvivingTCs</code>, <code>AddpT5asTrackCandidate</code>, <code>AddpT3asTrackCandidates</code>, <code>AddT5asTrackCandidate</code>, <code>AddT4asTrackCandidate</code> and <code>AddpLSasTrackCandidate</code>. On the GPU in QCD PU200 most of the remaining TC stage is <code>RemoveDupQuadrupletsBeforeTC</code> (10.6 ms/event), which the change does not touch. The other LST stages, from the hits to the T4s, keep their times within 0.7%, except the hit loading on the CPU, which moves by up to 3.6%; the change does not touch those stages.</p>
+<h2>Slower on the GPU with the HLT pixel seeds</h2>
+<p>Three steps take longer than before in these numbers in QCD PU200: pLS cross cleaning (0.042 → 0.080 ms/event), pT3 duplicates (0.019 → 0.053) and pT3 cross cleaning (0.019 → 0.045). The same holds in the HLT-chain ttbar (0.040 → 0.072, 0.016 → 0.049, 0.018 → 0.044) and in the jets without pileup (0.014 → 0.072, 0.012 → 0.052, 0.012 → 0.045). With about 1.8k pLSs, 430 pT3s and 1.7k pT5s per event in QCD PU200, the count, scan and fill launches of a step take longer than the old loop over the few pairs. These numbers put a wait after every launch, which charges each extra launch its full latency. Without the instrumentation, the pT3 stage, which holds one of the three steps, goes 0.94 → 0.95 ms/event in QCD PU200 (+1.2%, in each of the three rounds), while the pT5, pT3 and TC stages together go 15.52 → 12.23 ms/event and the whole event 37.85 → 34.55 ms. With the instrumentation the pT3 stage goes 0.97 → 1.00 ms/event in QCD PU200, 0.14 → 0.17 in the HLT-chain ttbar and 1.00 → 1.03 in the jets.</p>
+<h2>Memory</h2>
+<p>All new buffers are transient, and none existed before. Each one lives within one step. MB per event, as mean (max) for ttbar / QCD PU200 (first 100 events of each):</p>
+<table class="num">
+<tr><th>Buffer</th><th>Lifetime</th><th>MB per event</th></tr>
+<tr><td>pLS cross cleaning: TC grid and a bit set over the pLS hit indices</td><td>TC stage: <code>FillCrossCleanGrid</code> → <code>CrossCleanpLS</code></td><td>0.13 (0.16) / 0.08 (0.09)</td></tr>
+<tr><td>pT5 duplicates: pT5 grid, fixed size</td><td>pT5 stage: <code>FillPixelQuintupletGrid</code> → <code>RemoveDupPixelQuintupletsFromMap</code></td><td>0.07 / 0.07</td></tr>
+<tr><td>T5 cross cleaning: pT5 and pT3 grid, sized by the pT5s and pT3s</td><td>TC stage: <code>FillPixelObjectGrid</code> → <code>CrossCleanT5</code></td><td>0.06 (0.08) / 0.02 (0.02)</td></tr>
+<tr><td>T5 duplicates: T5 grid, sized by the T5s</td><td>TC stage: <code>FillT5DupGrid</code> → <code>RemoveDupQuintupletsBeforeTC</code></td><td>0.06 (0.07) / 0.06 (0.13)</td></tr>
+<tr><td>pT3 duplicates: pT3 hit buckets, fixed size</td><td>pT3 stage: <code>FillPixelTripletHitBuckets</code> → <code>RemoveDupPixelTripletsFromMap</code></td><td>0.19 / 0.19</td></tr>
+<tr><td>pT3 cross cleaning: pT5 grid, sized by the pT5s</td><td>TC stage: <code>FillPixelQuintupletSeedGrid</code> → <code>CrossCleanpT3</code></td><td>0.07 (0.08) / 0.04 (0.04)</td></tr>
+<tr><td>T4 cross cleaning: TC hit buckets, sized by the pT5, pT3 and T5 TCs</td><td>TC stage: <code>FillTCHitBuckets</code> → <code>CrossCleanT4</code></td><td>0.20 (0.23) / 0.21 (0.25)</td></tr>
+</table>
+<p>LST's peak allocation per event does change in ttbar. The peak is in the TC stage, after the TC collection is allocated, and the T4 cross-cleaning buckets are live there. So it rises by 0.16–0.23 MB in every ttbar event: 17.40 (24.75) → 17.60 (24.98) MB. In QCD PU200 the peak is reached outside the cleaning steps, so it is unchanged in every event (200 checked): 24.57 (45.49) MB in the first 100 events.</p>
+<p>What does not change:</p>
+<ul>
+<li>The sizes of every stored collection, from the hits to the TCs, and of the pT5, pT3 and T4 creation buffers, in every event (100 ttbar, 200 QCD PU200). The TC counts by type are identical in every event too.</li>
+<li>The track candidates: on the CPU, identical in every event of all four samples (pt, eta, phi and type of every TC). On the GPU, two runs of one and the same build already differ, in about 0.01% of the TCs in ttbar and 0.14% in QCD PU200 (checked for both before and after); before and after differ by the same amount.</li>
+</ul>
+</body></html>

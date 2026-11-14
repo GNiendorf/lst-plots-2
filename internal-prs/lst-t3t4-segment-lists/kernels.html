@@ -1,0 +1,118 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>LST pass masks and flat T3/T4 building: per-kernel detail</title>
+<style>body{font-family:sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;line-height:1.45;color:#111;background:#fff}
+h1{font-size:1.35em} h2{font-size:1.15em;margin-top:1.8em;border-bottom:1px solid #ccc;padding-bottom:3px}
+table{border-collapse:collapse;margin:10px 0 14px 0;font-size:0.93em;display:block;overflow-x:auto}
+th,td{border:1px solid #bbb;padding:4px 9px;vertical-align:top;text-align:left}
+th{background:#f0f0f0} table.num td:not(:first-child),table.num th:not(:first-child){white-space:nowrap}
+code{font-family:monospace;font-size:0.95em;background:#f4f4f4;padding:0 2px}
+a{color:#0645ad}
+@media (prefers-color-scheme: dark){body{color:#ddd;background:#181818} th{background:#2a2a2a} th,td{border-color:#555} code{background:#2a2a2a} h2{border-color:#555} a{color:#8ab4f8}}</style>
+</head><body>
+<p><a href="index.html">Tracking validation plots of this change</a></p>
+<h1>LST MD/LS/T3/T4 pass masks and flat T3/T4 building: per-kernel changes, timing and memory</h1>
+<p>Before = master 5b4335d798f, after = the PR head cd8b586bed9 (two commits on that master). Per reco category: the kernels before → after, their time, then one memory table. Every kernel listed runs once per event.</p>
+<p>Timing: standalone, HLT settings (pT cut 0.8 GeV), CPU 32 streams, GPU (NVIDIA L40) 1 stream, mean of 2 rounds (they agree within 2.1% per kernel and 0.7% per stage). Samples:</p>
+<ul>
+<li>ttbar: the standalone PU200 ttbar file, 175 events.</li>
+<li>QCD PU200: 200 events of RelValQCD_Pt_1800_2400_14 PU200 (D121), run through the Phase-2 HLT menu (CMSSW_20_1_X_2026-10-27-2300) into a tracking ntuple; its pixel seeds are the HLT Patatrack pixel tracks.</li>
+</ul>
+<p>It is measured with a wait after each kernel in an instrumented build that is not part of the PR; the instrumented and the plain builds give identical track candidates on both samples. A stage time also includes its allocations, memsets and host synchronizations. Memory: LST's own per-event allocation report, 100 ttbar and 200 QCD PU200 events.</p>
+<p>On the CPU backends, where a block runs on one thread at a fixed cost, these launches use a single block (the kernels loop over the grid): <code>CountMiniDoublets</code>, <code>CreateMiniDoublets</code>, <code>AddPixelMiniDoubletsToEventKernel</code>, <code>CountMiniDoubletConnections</code>, <code>CreateSegments</code>, <code>FillCompactSegments</code>, <code>CountSegmentConnections</code>, <code>CreateTriplets</code>, <code>CountTripletLSConnections</code>, <code>CreateQuadruplets</code> and <code>RemoveDupQuadrupletsBeforeTC</code>. <code>CreateTripletsFromMatches</code> and <code>RemoveDupQuadrupletsAfterBuild</code> keep several blocks on every backend.</p>
+<h2>MD</h2>
+<table class="txt"><thead><tr><th>Kernel</th><th>Before</th><th>After</th></tr></thead><tbody>
+<tr><td><code>CountMiniDoublets</code></td><td>one thread per (lower hit, upper hit) pair (16 modules × 32 threads per block); counts the pairs that pass the MD selection</td><td>one thread per lower hit (2 modules × 64 threads per block); also stores the decisions for its first 64 upper hits in a bit mask</td></tr>
+<tr><td><code>CreateMiniDoublets</code></td><td>one thread per pair (16 × 32 per block); runs the MD selection on every pair a second time</td><td>one thread per lower hit (4 × 32 per block); creates the stored pairs; runs the selection only for the upper hits past the mask</td></tr>
+<tr><td><code>AddPixelMiniDoubletsToEventKernel</code></td><td>kernel unchanged</td><td>one block on CPU</td></tr>
+</tbody></table>
+<p>Problem: creation repeated every decision the count had already made. Unchanged: <code>CreateMDArrayRangesGPU</code>, <code>AddMiniDoubletRangesToEventExplicit</code>.</p>
+<table class="num"><thead><tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr></thead><tbody>
+<tr><td><code>CountMiniDoublets</code></td><td>42.3 → 38.6</td><td>46.6 → 42.5</td><td>0.092 → 0.056</td><td>0.103 → 0.062</td></tr>
+<tr><td><code>CreateMiniDoublets</code></td><td>46.4 → 3.84</td><td>51.1 → 4.08</td><td>0.106 → 0.031</td><td>0.122 → 0.034</td></tr>
+<tr><td><code>AddPixelMiniDoubletsToEventKernel</code></td><td>0.98 → 0.98</td><td>0.095 → 0.094</td><td>0.013 → 0.013</td><td>0.011 → 0.010</td></tr>
+<tr><td>unchanged (2 kernels)</td><td>0.054 → 0.054</td><td>0.053 → 0.053</td><td>0.026 → 0.027</td><td>0.027 → 0.026</td></tr>
+<tr><td><b>MD stage</b></td><td><b>89.8 → 43.6</b></td><td><b>97.9 → 46.8</b></td><td><b>0.275 → 0.165</b></td><td><b>0.302 → 0.170</b></td></tr>
+</tbody></table>
+<h2>LS</h2>
+<table class="txt"><thead><tr><th>Kernel</th><th>Before</th><th>After</th></tr></thead><tbody>
+<tr><td><code>CountMiniDoubletConnections</code></td><td>one block (8 × 32 threads) per inner module; a looser pre-cut (<code>passLooseSegmentCuts</code>) per MD pair, for the count only</td><td>one block (2 × 64 threads) per inner module; the full LS selection for the first 256 outer MDs of each inner MD, stored in a bit mask, plus the first mask bit of each connected module; the pairs past the mask are counted without the selection; <code>passLooseSegmentCuts</code> is removed</td></tr>
+<tr><td><code>CreateSegments</code></td><td>one block (8 × 32 threads) per inner module; the full LS selection on every MD pair</td><td>one block (128 threads) per inner module, one thread per (connected module, inner MD); visits only the set bits of its connected module in the inner MD's mask (the first mask bit of each connected module is stored by the count); runs the selection only for the pairs past the mask</td></tr>
+<tr><td><code>FillCompactSegments</code></td><td>kernel unchanged</td><td>one block on CPU</td></tr>
+</tbody></table>
+<p>Problem: the full selection ran only at creation, on every pair, and the loose count sized the candidate buffer 9.7 times larger than the number of LSs created in ttbar (9.0 times in QCD PU200). Unchanged: <code>CreateSegmentArrayRanges</code>, <code>ComputeCompactSegmentOffsets</code>, <code>SetCompactSegmentModuleIndices</code>, <code>AddSegmentRangesToEventExplicit</code>.</p>
+<table class="num"><thead><tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr></thead><tbody>
+<tr><td><code>CountMiniDoubletConnections</code></td><td>14.9 → 55.8</td><td>16.3 → 64.1</td><td>0.065 → 0.124</td><td>0.076 → 0.145</td></tr>
+<tr><td><code>CreateSegments</code></td><td>55.6 → 3.86</td><td>64.0 → 4.09</td><td>0.142 → 0.046</td><td>0.177 → 0.060</td></tr>
+<tr><td><code>FillCompactSegments</code></td><td>2.90 → 2.53</td><td>3.41 → 3.16</td><td>0.016 → 0.016</td><td>0.022 → 0.021</td></tr>
+<tr><td>unchanged (4 kernels)</td><td>0.19 → 0.18</td><td>0.17 → 0.18</td><td>0.066 → 0.066</td><td>0.068 → 0.067</td></tr>
+<tr><td><b>LS stage</b></td><td><b>73.6 → 62.4</b></td><td><b>83.9 → 71.6</b></td><td><b>0.318 → 0.283</b></td><td><b>0.371 → 0.324</b></td></tr>
+</tbody></table>
+<h2>T3</h2>
+<table class="txt"><thead><tr><th>Kernel</th><th>Before</th><th>After</th></tr></thead><tbody>
+<tr><td><code>FillSegmentsByInnerMD</code></td><td>–</td><td>new: the list of LSs starting at each MD, one block per lower module; also used in the T5 stage (see T5)</td></tr>
+<tr><td><code>CountSegmentConnections</code></td><td>one block per inner module; each inner LS scans all LSs of the middle module, keeps those starting at its outer MD and counts those passing the pointing and r-z cuts</td><td>flat over the LSs; each inner LS visits only the LSs starting at its outer MD and stores the decisions for the first 32</td></tr>
+<tr><td><code>CreateTriplets</code></td><td>one block per inner module; the same scan with the pointing and r-z cuts (step 1), then the full T3 selection of the stored pairs (step 2) in that block</td><td>step 1 only, flat over the LSs; reads the stored decisions and evaluates only the rest</td></tr>
+<tr><td><code>CreateTripletsFromMatches</code></td><td>–</td><td>new: step 2, the full T3 selection, flat over the stored pairs</td></tr>
+<tr><td><code>CompactTriplets</code></td><td>the by-LS offsets of a module summed by one thread</td><td>summed by all threads of the module's block</td></tr>
+</tbody></table>
+<p>Problem: the candidate list of an inner LS held every LS of the middle module, although only those starting at the shared MD can match. Also, a dense module was left to a single block. Unchanged: <code>CreateTripletArrayRanges</code>, <code>CompactModuleOffsetsKernel</code>, <code>SetCompactTripletModuleIndices</code>.</p>
+<table class="num"><thead><tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr></thead><tbody>
+<tr><td><code>FillSegmentsByInnerMD</code></td><td>– → 0.45</td><td>– → 0.52</td><td>– → 0.031</td><td>– → 0.036</td></tr>
+<tr><td><code>CountSegmentConnections</code></td><td>20.6 → 18.8</td><td>54.5 → 41.9</td><td>0.161 → 0.035</td><td>3.66 → 0.047</td></tr>
+<tr><td><code>CreateTriplets</code></td><td>27.7 → 1.37</td><td>80.0 → 6.09</td><td>0.174 → 0.024</td><td>3.50 → 0.064</td></tr>
+<tr><td><code>CreateTripletsFromMatches</code></td><td>– → 12.7</td><td>– → 34.1</td><td>– → 0.017</td><td>– → 0.055</td></tr>
+<tr><td><code>CompactTriplets</code></td><td>0.84 → 0.95</td><td>1.88 → 2.16</td><td>0.097 → 0.026</td><td>0.354 → 0.139</td></tr>
+<tr><td>unchanged (3 kernels)</td><td>0.15 → 0.14</td><td>0.16 → 0.15</td><td>0.073 → 0.073</td><td>0.117 → 0.114</td></tr>
+<tr><td><b>T3 stage</b></td><td><b>49.4 → 34.5</b></td><td><b>136.7 → 85.3</b></td><td><b>0.578 → 0.292</b></td><td><b>7.72 → 0.545</b></td></tr>
+</tbody></table>
+<h2>T4</h2>
+<table class="txt"><thead><tr><th>Kernel</th><th>Before</th><th>After</th></tr></thead><tbody>
+<tr><td><code>CountTripletLSConnections</code></td><td>one block per inner module; counts the pairs of each inner T3 (full T4 selection in dense modules)</td><td>flat over the T3s; also sums the counts per module and stores the decisions of the dense pairs for the first 32 outer T3s; sparse pairs must also pass the charge match (the cheapest T4 cut)</td></tr>
+<tr><td><code>CreateEligibleModulesListForQuadruplets</code></td><td>single block; per-module T4 capacity from a loop over the T3s of every module</td><td>reads the per-module counts</td></tr>
+<tr><td><code>CreateQuadruplets</code></td><td>one block per module; a dense module (at least <code>kNTripletThreshold</code> T3s) runs the full T4 selection of all its pairs in that block; the pairs of the other modules are listed, then evaluated in a second pass</td><td>flat over the T3s, all modules; evaluates each counted pair directly and skips the dense pairs that the stored decisions reject</td></tr>
+<tr><td><code>RemoveDupQuadrupletsAfterBuild</code></td><td>a fixed number of blocks looping over all lower modules</td><td>the eligible modules only, several blocks per module</td></tr>
+<tr><td><code>RemoveDupQuadrupletsBeforeTC</code> (TC stage)</td><td>one thread per pair of eligible modules, looping over all T4 pairs of the two</td><td>flat over the compacted T4s</td></tr>
+</tbody></table>
+<p>Problem: in the count, the creation and both duplicate removals, a dense module was left to a single block or thread. On top of that, the single-block kernel looped over all T3s. Unchanged: <code>CompactModuleOffsetsKernel</code>, <code>CompactModuleObjects</code>, <code>SetCompactModuleIndices</code>.</p>
+<table class="num"><thead><tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr></thead><tbody>
+<tr><td><code>CountTripletLSConnections</code></td><td>0.69 → 0.33</td><td>36.4 → 34.9</td><td>0.076 → 0.018</td><td>10.2 → 0.087</td></tr>
+<tr><td><code>CreateEligibleModulesListForQuadruplets</code></td><td>0.063 → 0.039</td><td>0.076 → 0.040</td><td>0.028 → 0.012</td><td>0.296 → 0.013</td></tr>
+<tr><td><code>CreateQuadruplets</code></td><td>1.55 → 1.52</td><td>5.06 → 3.59</td><td>0.061 → 0.029</td><td>1.22 → 0.048</td></tr>
+<tr><td><code>RemoveDupQuadrupletsAfterBuild</code></td><td>0.051 → 0.046</td><td>4.27 → 3.89</td><td>0.032 → 0.013</td><td>0.949 → 0.126</td></tr>
+<tr><td>unchanged (3 kernels)</td><td>0.046 → 0.046</td><td>0.068 → 0.063</td><td>0.038 → 0.038</td><td>0.050 → 0.048</td></tr>
+<tr><td><b>T4 stage</b></td><td><b>2.42 → 2.00</b></td><td><b>45.9 → 42.5</b></td><td><b>0.264 → 0.143</b></td><td><b>12.8 → 0.359</b></td></tr>
+<tr><td><code>RemoveDupQuadrupletsBeforeTC</code> (TC stage)</td><td>0.12 → 0.026</td><td>0.62 → 0.61</td><td>0.282 → 0.274</td><td>13.7 → 3.17</td></tr>
+</tbody></table>
+<h2>T5</h2>
+<table class="txt"><thead><tr><th>Kernel</th><th>Before</th><th>After</th></tr></thead><tbody>
+<tr><td>list of the LSs that start a T3, by inner MD</td><td><code>FillLSonT3ByMD</code>, one block per lower module</td><td><code>FillSegmentsByInnerMD</code> with the T3 counts passed, which lists only those LSs; same launch and same buffers</td></tr>
+</tbody></table>
+<p>Unchanged: all other T5 kernels.</p>
+<table class="num"><thead><tr><th>ms/event, before → after</th><th>CPU ttbar</th><th>CPU QCD PU200</th><th>GPU ttbar</th><th>GPU QCD PU200</th></tr></thead><tbody>
+<tr><td><code>FillLSonT3ByMD</code> → <code>FillSegmentsByInnerMD</code></td><td>0.57 → 0.58</td><td>0.72 → 0.72</td><td>0.024 → 0.024</td><td>0.034 → 0.033</td></tr>
+<tr><td><b>T5 stage</b></td><td><b>20.8 → 20.8</b></td><td><b>331.5 → 329.6</b></td><td><b>0.210 → 0.209</b></td><td><b>1.14 → 1.54</b></td></tr>
+</tbody></table>
+<p>The list kernel costs the same before and after. On the GPU in QCD PU200 the T5 stage is 0.41 ms/event slower (1.14 → 1.54, +36%, in both rounds), outside that kernel; the number of T5s is the same in every event (checked on the CPU). The cause is not traced. The pT3 stage there goes from 0.95 to 1.11 ms. The CPU T5 times and the GPU ttbar ones change by less than 0.6% (the two master rounds of the CPU QCD PU200 T5 stage differ by 0.5%). The whole GPU QCD PU200 event (instrumented build) goes from 38.2 to 8.4 ms.</p>
+<h2>Four stages</h2>
+<p>The four stages together, with <code>RemoveDupQuadrupletsBeforeTC</code>, ms/event:</p>
+<table class="num"><thead><tr><th></th><th>CPU</th><th>GPU</th></tr></thead><tbody>
+<tr><td>ttbar</td><td>215.3 → 142.6 (-33.8%)</td><td>1.72 → 1.16 (-32.7%)</td></tr>
+<tr><td>QCD PU200</td><td>365.1 → 246.7 (-32.4%)</td><td>34.9 → 4.57 (-86.9%)</td></tr>
+</tbody></table>
+<h2>Memory</h2>
+<p>All the buffers that change are transient, each one allocated and released within one stage. The table gives MB per event, as mean (max) for ttbar / QCD PU200:</p>
+<table class="txt"><thead><tr><th>Buffer</th><th>Lifetime</th><th>Before</th><th>After</th></tr></thead><tbody>
+<tr><td>MD pass masks, 8 bytes per hit</td><td>MD stage: <code>CountMiniDoublets</code> → <code>CreateMiniDoublets</code></td><td>–</td><td>2.53 (3.21) / 2.08 (2.57)</td></tr>
+<tr><td>LS pass masks, 32 bytes per outer-tracker MD, and the first mask bit of each connected module, 2 bytes per (lower module, connected module)</td><td>LS stage: <code>CountMiniDoubletConnections</code> → <code>CreateSegments</code></td><td>–</td><td>2.39 (2.81) / 2.53 (2.98)</td></tr>
+<tr><td>LS candidate buffer, sized by the LS count</td><td>LS stage: <code>CreateSegments</code> → compaction</td><td>4.81 (7.86) / 5.79 (9.04)</td><td>0.59 (0.89) / 0.74 (1.19)</td></tr>
+<tr><td>LS lists by inner MD and T3 pass masks</td><td>T3 stage: <code>FillSegmentsByInnerMD</code> → <code>CreateTripletsFromMatches</code></td><td>–</td><td>1.74 (2.68) / 2.19 (3.20)</td></tr>
+<tr><td>T4 counting buffers: per-T3 counter (4 bytes per T3); after, also the per-T3 pass mask and per-module counts</td><td>T4 stage: <code>CountTripletLSConnections</code> → creation</td><td>0.18 (0.32) / 0.58 (1.33)</td><td>0.41 (0.69) / 1.20 (2.72)</td></tr>
+<tr><td>T4 build buffer, sized by the T4 count; after, also without the pair-list column</td><td>T4 stage: creation → compaction</td><td>0.56 (1.20) / 1.08 (2.36)</td><td>0.44 (0.77) / 0.78 (1.57)</td></tr>
+</tbody></table>
+<p>What does not change:</p>
+<ul>
+<li>The sizes of the stored MD, LS, T3, T4 and T5 collections, in every event of both samples except one: in QCD PU200 event 115 (200 events checked), 195882 triplets instead of 195883. The track candidates are identical in every event. A stored T4 is 8 bytes smaller (the pair-list column is gone).</li>
+<li>The T3 creation buffer, within 0.1%.</li>
+<li>The T5 stage buffers.</li>
+<li>LST's peak allocation per event: 17.4 (24.7) MB for ttbar and 24.6 (45.5) MB for QCD PU200. It is identical in all but 2 ttbar and 3 QCD events, where it is 0.1 MB lower; the new buffers are never live at the peak.</li>
+</ul>
+</body></html>
